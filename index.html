@@ -175,6 +175,7 @@ body.ro .rwp,body.ro .tg{pointer-events:none}
         <button class="btn" id="cfgBtn" title="Configuración y respaldo">⚙︎ Configuración</button>
         <button class="btn primary" id="saveBtn" title="Descarga el tablero con todos los datos adentro">💾 Guardar tablero</button>
         <span class="sync" id="syncChip" hidden></span>
+        <button class="btn" id="authBtn" hidden>Ingresar para editar</button>
       </div>
     </div>
     <nav class="tabs" id="tabs">
@@ -1083,13 +1084,18 @@ function exportVideos(){
 /* =========================================================
    MODO ONLINE (página publicada): base de datos compartida en vivo
    ========================================================= */
+/* Configuración de Firebase (base de datos online). null = sin base: funciona como archivo. */
+const FB_CONFIG = /*__FB__*/{"apiKey": "AIzaSyABooZYe-HetWJbKbb5sCNMPN1vlOYLvOs", "authDomain": "control-lideres.firebaseapp.com", "projectId": "control-lideres", "storageBucket": "control-lideres.firebasestorage.app", "messagingSenderId": "375176916798", "appId": "1:375176916798:web:bacfd08506717a593b866f"}/*__FBE__*/;
+const FB_VER = '10.12.2';
+let FB_AUTH=null, SYNC_STARTED=false;
+const stableStr = v => v===null||typeof v!=='object' ? JSON.stringify(v) : Array.isArray(v) ? '['+v.map(stableStr).join(',')+']' : '{'+Object.keys(v).sort().filter(k=>v[k]!==undefined).map(k=>JSON.stringify(k)+':'+stableStr(v[k])).join(',')+'}';
 let DB=null, DL=null, ONLINE=false, RO=false, FLUSHING=false, FTIMER=null, CAN_W=null, REMOTE_PENDING=false;
 const WRITTEN={}; let CACHE={};
 const ONLINE_COLS=['nominas','agendas','salidas','videos','resv','resr'];
 const ONLINE_DOCS=['ctl/config','res/meta'];
 function setSync(s,msg){
   const c=document.getElementById('syncChip'); if(!c) return; c.hidden=false; c.className='sync '+s;
-  c.textContent = s==='ok'?'✓ Guardado online' : s==='saving'?'Guardando…' : s==='ro'?'Solo lectura · se actualiza en vivo' : s==='err'?('No se pudo guardar'+(msg?' · '+msg:'')) : 'Conectando…';
+  c.textContent = s==='ok'?'✓ Guardado online' : s==='saving'?'Guardando…' : s==='ro'?'Solo lectura · en vivo' : s==='err'?('No se pudo guardar'+(msg?' · '+msg:'')) : 'Conectando…';
 }
 function saveBlob(name, blob){
   if(DL){ DL.save({filename:name, data:blob}).catch(e=>{ if(e&&e.code!=='declined') toast('No se pudo descargar ('+(e.code||'error')+')'); }); return; }
@@ -1142,15 +1148,15 @@ async function flush(){
   try{
     const docs=docsFromState();
     for(const [p,d] of Object.entries(docs)){
-      const j=JSON.stringify(d); if(WRITTEN[p]===j) continue;
+      const j=stableStr(d); if(WRITTEN[p]===j) continue;
       const prev=WRITTEN[p]; WRITTEN[p]=j; CACHE[p]=d;
-      try{ await DB.doc(p).set(d); }catch(e){ if(prev===undefined) delete WRITTEN[p]; else WRITTEN[p]=prev; throw e; }
+      try{ await DB.doc(p).set(JSON.parse(JSON.stringify(d))); }catch(e){ if(prev===undefined) delete WRITTEN[p]; else WRITTEN[p]=prev; throw e; }
     }
     for(const p of Object.keys(WRITTEN)) if(!(p in docs)){ await DB.doc(p).delete(); delete WRITTEN[p]; delete CACHE[p]; }
     setSync('ok');
   }catch(e){
     const code=e&&e.code;
-    if(code==='invalid_argument' && CAN_W!==true){ RO=true; applyRO(); setSync('ro'); }
+    if((code==='invalid_argument' && CAN_W!==true) || code==='permission-denied'){ RO=true; applyRO(); setSync('ro'); if(code==='permission-denied') toast('Esta cuenta no tiene permiso para editar el tablero'); }
     else setSync('err', code==='quota_exceeded'?'se llenó el espacio de datos':code==='unavailable'?'reintentá en un momento':(code||''));
   }
   FLUSHING=false;
@@ -1161,6 +1167,10 @@ function applyRO(){
   document.body.classList.add('ro');
   try{ const d=resFrame().contentDocument; if(d&&!d.getElementById('roStyle')){ const st=d.createElement('style'); st.id='roStyle';
     st.textContent='.hactions,[onclick*="editTeamGoal"],[onclick*="editNom"],[onclick*="addVend"],[onclick*="delVend"],[onclick*="importCfg"],[onclick*="exportNom"]{display:none!important}'; d.head.appendChild(st); } }catch(e){}
+}
+function removeRO(){
+  document.body.classList.remove('ro');
+  try{ const s=resFrame().contentDocument.getElementById('roStyle'); if(s) s.remove(); }catch(e){}
 }
 function onlineFrameStyle(){
   try{ const d=resFrame().contentDocument; if(!d||d.getElementById('onStyle')) return; const st=d.createElement('style'); st.id='onStyle';
@@ -1177,7 +1187,7 @@ function subscribe(){
   ONLINE_COLS.forEach(col=>{
     DB.collection(col).onSnapshot(snap=>{
       let changed=false; const seen=new Set();
-      snap.docs.forEach(d=>{ const p=col+'/'+d.id; seen.add(p); const data=d.data(); const j=JSON.stringify(data);
+      snap.docs.forEach(d=>{ const p=col+'/'+d.id; seen.add(p); const data=d.data(); const j=stableStr(data);
         if(WRITTEN[p]!==j){ changed=true; WRITTEN[p]=j; CACHE[p]=data; } });
       Object.keys(CACHE).filter(p=>p.startsWith(col+'/')&&!seen.has(p)).forEach(p=>{ changed=true; delete CACHE[p]; delete WRITTEN[p]; });
       if(changed) applyRemote(col==='resv'||col==='resr');
@@ -1185,12 +1195,13 @@ function subscribe(){
   });
   ONLINE_DOCS.forEach(p=>{
     DB.doc(p).onSnapshot(d=>{
-      if(!d.exists) return; const data=d.data(); const j=JSON.stringify(data);
+      if(!d.exists) return; const data=d.data(); const j=stableStr(data);
       if(WRITTEN[p]!==j){ WRITTEN[p]=j; CACHE[p]=data; applyRemote(p==='res/meta'); }
     }, ()=>{});
   });
 }
 async function initOnline(){
+  if(FB_CONFIG) return initFirebase();
   if(!window.claude || typeof window.claude.use!=='function') return;   // archivo abierto en la computadora
   const [db,user,dl]=await Promise.all([claude.use('db'),claude.use('user'),claude.use('downloads')]);
   DL=dl; if(!db) return;
@@ -1198,13 +1209,44 @@ async function initOnline(){
   document.getElementById('saveBtn').hidden=true; setSync('conn');
   try{ CAN_W = user ? await user.can('data.write') : null; }catch(e){}
   RO = CAN_W===false; if(RO) applyRO();
+  await startSync();
+}
+const loadScript = src => new Promise((res,rej)=>{ const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=rej; document.head.appendChild(s); });
+async function initFirebase(){
+  try{
+    for(const m of ['app','auth','firestore']) await loadScript(`https://www.gstatic.com/firebasejs/${FB_VER}/firebase-${m}-compat.js`);
+  }catch(e){ toast('No se pudo conectar con la base online. Revisá tu conexión.'); return; }
+  firebase.initializeApp(FB_CONFIG);
+  const fs=firebase.firestore(); FB_AUTH=firebase.auth();
+  DB={ doc:p=>fs.doc(p), collection:c=>fs.collection(c) };
+  ONLINE=true; dirty=false; document.body.classList.add('online');
+  document.getElementById('saveBtn').hidden=true; setSync('conn');
+  const ab=document.getElementById('authBtn'); ab.hidden=false;
+  ab.onclick=async()=>{
+    if(FB_AUTH.currentUser){ await FB_AUTH.signOut(); return; }
+    try{ await FB_AUTH.signInWithPopup(new firebase.auth.GoogleAuthProvider()); }
+    catch(e){ if(e&&e.code!=='auth/popup-closed-by-user'&&e.code!=='auth/cancelled-popup-request') toast('No se pudo ingresar: '+(e.code||e.message)); }
+  };
+  RO=true; applyRO();
+  await new Promise(res=>{ let first=true; FB_AUTH.onAuthStateChanged(u=>{
+    RO=!u; CAN_W = u ? null : false;
+    if(RO) applyRO(); else removeRO();
+    ab.textContent = u ? 'Salir' : 'Ingresar para editar';
+    ab.title = u ? ('Conectado como '+(u.email||'')) : 'Solo la cuenta autorizada puede editar';
+    if(SYNC_STARTED){ setSync(RO?'ro':'ok'); if(!RO && !Object.keys(CACHE).length) flush(); }
+    if(first){ first=false; res(); }
+  }); });
+  await startSync();
+}
+async function startSync(){
+  SYNC_STARTED=true;
   const C={};
   try{
     await Promise.all(ONLINE_COLS.map(async col=>{ const snap=await DB.collection(col).get(); snap.docs.forEach(d=>{ C[col+'/'+d.id]=d.data(); }); }));
     await Promise.all(ONLINE_DOCS.map(async p=>{ const d=await DB.doc(p).get(); if(d.exists) C[p]=d.data(); }));
   }catch(e){ setSync('err','no se pudieron leer los datos'); return; }
   if(Object.keys(C).length){
-    Object.entries(C).forEach(([p,d])=>{ WRITTEN[p]=JSON.stringify(d); }); CACHE=C;
+    Object.entries(C).forEach(([p,d])=>{ WRITTEN[p]=stableStr(d); }); CACHE=C;
     S=stateFromDocs(C); resCache={}; sysIdx=null; buildResFrame(); syncPeriod(); render();
     setSync(RO?'ro':'ok');
   } else if(!RO){
